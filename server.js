@@ -28,9 +28,9 @@ const io = socketIo(server, {
 // Database connection pool
 const pool = mysql.createPool({
     host: 'localhost',
-    user: 'database_user',
-    password: 'database_password',
-    database: 'your_database'
+    user: 'duszyczkowo',
+    password: 'i_still_walk_in_light',
+    database: 'satya'
 });
 
 // Store user socket IDs
@@ -51,28 +51,41 @@ io.on('connection', async (socket) => {
         try {
             const connection = await pool.getConnection();
             
-            // Check if conversation exists
-            let [rows] = await connection.execute(
-                'SELECT * FROM conversations WHERE (user1_id = ? AND user2_id = ?) OR (user1_id = ? AND user2_id = ?)',
-                [data.current_user_id, data.recipient_id, data.recipient_id, data.current_user_id]
-            );
+            // Check if a conversation exists between these users
+            const [existingConversations] = await connection.execute(`
+                SELECT c.conversation_id 
+                FROM Conversations c
+                JOIN ConversationParticipants cp1 ON c.conversation_id = cp1.conversation_id
+                JOIN ConversationParticipants cp2 ON c.conversation_id = cp2.conversation_id
+                WHERE cp1.user_id = ? AND cp2.user_id = ?
+                AND (SELECT COUNT(*) FROM ConversationParticipants WHERE conversation_id = c.conversation_id) = 2
+            `, [data.current_user_id, data.recipient_id]);
             
             let conversation_id;
             
-            if (rows.length === 0) {
+            if (existingConversations.length === 0) {
                 // Create new conversation
                 const [result] = await connection.execute(
-                    'INSERT INTO conversations (user1_id, user2_id) VALUES (?, ?)',
-                    [data.current_user_id, data.recipient_id]
+                    'INSERT INTO Conversations (created_at) VALUES (NOW())'
                 );
                 conversation_id = result.insertId;
+                
+                // Add participants
+                await connection.execute(
+                    'INSERT INTO ConversationParticipants (conversation_id, user_id) VALUES (?, ?)',
+                    [conversation_id, data.current_user_id]
+                );
+                await connection.execute(
+                    'INSERT INTO ConversationParticipants (conversation_id, user_id) VALUES (?, ?)',
+                    [conversation_id, data.recipient_id]
+                );
             } else {
-                conversation_id = rows[0].id;
+                conversation_id = existingConversations[0].conversation_id;
             }
             
             // Get recipient info
             const [userInfo] = await connection.execute(
-                'SELECT username, photo FROM users WHERE id = ?',
+                'SELECT username, photo FROM users WHERE user_id = ?',
                 [data.recipient_id]
             );
             
@@ -101,14 +114,15 @@ io.on('connection', async (socket) => {
             const connection = await pool.getConnection();
             
             // Get messages
-            const [messages] = await connection.execute(
-                'SELECT m.*, u.username as sender_name, u.photo as sender_photo ' +
-                'FROM messages m ' +
-                'JOIN users u ON m.sender_id = u.id ' +
-                'WHERE m.conversation_id = ? ' +
-                'ORDER BY m.sent_at ASC',
-                [data.conversation_id]
-            );
+            const [messages] = await connection.execute(`
+                SELECT m.message_id as id, m.conversation_id, m.sender_id, 
+                       u.username as sender_name, u.photo as sender_photo, 
+                       m.content, m.sent_at
+                FROM Messages m
+                JOIN users u ON m.sender_id = u.user_id
+                WHERE m.conversation_id = ?
+                ORDER BY m.sent_at ASC
+            `, [data.conversation_id]);
             
             connection.release();
             
@@ -134,7 +148,7 @@ io.on('connection', async (socket) => {
             
             // Store message in database
             const [result] = await connection.execute(
-                'INSERT INTO messages (conversation_id, sender_id, content, sent_at) VALUES (?, ?, ?, NOW())',
+                'INSERT INTO Messages (conversation_id, sender_id, content, sent_at) VALUES (?, ?, ?, NOW())',
                 [messageData.conversation_id, messageData.sender_id, messageData.content]
             );
             
@@ -142,16 +156,22 @@ io.on('connection', async (socket) => {
             const [timeResult] = await connection.execute('SELECT NOW() as sent_at');
             const sent_at = timeResult[0].sent_at;
             
-            // Get participants in this conversation
-            const [participants] = await connection.execute(
-                'SELECT user1_id, user2_id FROM conversations WHERE id = ?',
+            // Update conversation's updated_at timestamp
+            await connection.execute(
+                'UPDATE Conversations SET updated_at = NOW() WHERE conversation_id = ?',
                 [messageData.conversation_id]
             );
             
             // Get sender info
             const [senderInfo] = await connection.execute(
-                'SELECT username, photo FROM users WHERE id = ?',
+                'SELECT username, photo FROM users WHERE user_id = ?',
                 [messageData.sender_id]
+            );
+            
+            // Get participants in this conversation
+            const [participants] = await connection.execute(
+                'SELECT user_id FROM ConversationParticipants WHERE conversation_id = ?',
+                [messageData.conversation_id]
             );
             
             connection.release();
@@ -173,11 +193,10 @@ io.on('connection', async (socket) => {
                 message: completeMessage
             });
             
-            // Notify all participants
-            const participantIds = [participants[0].user1_id, participants[0].user2_id];
-            participantIds.forEach(participant_id => {
-                if (participant_id != messageData.sender_id && userSockets[participant_id]) {
-                    io.to(userSockets[participant_id]).emit('receive_message', completeMessage);
+            // Notify all participants except sender
+            participants.forEach(participant => {
+                if (participant.user_id != messageData.sender_id && userSockets[participant.user_id]) {
+                    io.to(userSockets[participant.user_id]).emit('receive_message', completeMessage);
                 }
             });
             
@@ -195,28 +214,54 @@ io.on('connection', async (socket) => {
         try {
             const connection = await pool.getConnection();
             
-            // Get the other participant
+            // Get the other participants in the conversation
             const [participants] = await connection.execute(
-                'SELECT user1_id, user2_id FROM conversations WHERE id = ?',
-                [data.conversation_id]
+                'SELECT user_id FROM ConversationParticipants WHERE conversation_id = ? AND user_id != ?',
+                [data.conversation_id, data.user_id]
             );
             
             connection.release();
             
-            // Determine recipient
-            const recipient_id = participants[0].user1_id == data.user_id ? 
-                participants[0].user2_id : participants[0].user1_id;
-            
-            // Send typing indicator to recipient
-            if (userSockets[recipient_id]) {
-                io.to(userSockets[recipient_id]).emit('user_typing', {
-                    conversation_id: data.conversation_id,
-                    is_typing: data.is_typing
-                });
-            }
+            // Send typing indicator to all other participants
+            participants.forEach(participant => {
+                if (userSockets[participant.user_id]) {
+                    io.to(userSockets[participant.user_id]).emit('user_typing', {
+                        conversation_id: data.conversation_id,
+                        user_id: data.user_id,
+                        is_typing: data.is_typing
+                    });
+                }
+            });
             
         } catch (error) {
             console.error('Error with typing indicator:', error);
+        }
+    });
+
+    // Mark messages as read
+    socket.on('mark_messages_read', async (data) => {
+        try {
+            const connection = await pool.getConnection();
+            
+            // Update messages where the current user is not the sender
+            await connection.execute(
+                'UPDATE Messages SET is_read = 1 WHERE conversation_id = ? AND sender_id != ?',
+                [data.conversation_id, data.user_id]
+            );
+            
+            connection.release();
+            
+            socket.emit('messages_marked_read', {
+                success: true,
+                conversation_id: data.conversation_id
+            });
+            
+        } catch (error) {
+            console.error('Database error:', error);
+            socket.emit('messages_marked_read', {
+                success: false,
+                error: 'Failed to mark messages as read'
+            });
         }
     });
 

@@ -5,41 +5,6 @@ let typingTimer = null;
 // Utility functions (keeping your existing utility functions)
 // compareDateTimes, formatTime, formatDate, setCookie, getCookie, etc.
 
-// Open messaging popup - now using WebSockets
-function openMessagingPopup(userId, username, user_photo) {
-    // Request conversation via WebSocket
-    socket.emit('get_conversation', {
-        current_user_id: $('#sender_id').val(),
-        recipient_id: userId
-    });
-}
-
-// Create conversation tab 
-function createConversationTab(response) {
-    currentConversationId = response.conversation_id;
-    
-    if (!$('#message-dropdown').hasClass('show-message-dropdown')) {
-        $('#message-dropdown').addClass('show-message-dropdown');
-        $('.unread-messages').css({ 'display': 'none' });
-    }
-    
-    // Check if conversation tab already exists
-    if(!$('.messaging-popup-wrapper').find('#messaging-tab-' + currentConversationId).length > 0) {
-        // New conversation tab (your existing HTML template)
-        let newConversationTab = $(`
-            <div class="messaging-popup" id="messaging-tab-${currentConversationId}">
-                <!-- Your existing HTML structure -->
-            </div>
-        `);
-        
-        $('.messaging-popup-wrapper').append(newConversationTab);
-        
-        // Request messages via WebSocket
-        socket.emit('get_messages', {
-            conversation_id: currentConversationId
-        });
-    }
-}
 
 // Load messages from socket data
 function loadMessagesFromData(messages, conversationId) {
@@ -121,3 +86,11 @@ function minimizeConversationTab(conversationId) {
         $('.messaging-popup-wrapper').find('#messaging-tab-' + conversationId).removeClass('minimized');
     }
 }
+$('.member-item a').click(function(e) {
+    e.preventDefault();
+    const userId = $(this).attr('href').split('=')[1];
+    const username = $(this).text();
+    const user_photo = $(this).attr('data-user-photo');
+    
+    openMessagingPopup(userId, username, user_photo);
+});
