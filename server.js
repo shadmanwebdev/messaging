@@ -208,7 +208,109 @@ io.on('connection', async (socket) => {
             });
         }
     });
+    
+    
+    const getUnreadCount = async (user_id) => {
+        const connection = await pool.getConnection();
+    
+        const [result] = await connection.execute(
+            `SELECT COUNT(*) as unreadCount 
+             FROM Messages m
+             JOIN ConversationParticipants cp ON m.conversation_id = cp.conversation_id
+             WHERE cp.user_id = ? AND m.sender_id != ? AND m.is_read = 0`,
+            [user_id, user_id]
+        );
+        connection.release();
+        return result[0].unreadCount;
+    };
 
+    socket.on('getUnreadCount', async () => {
+        try {
+            const unreadCount = await getUnreadCount();
+            console.log('unreadCount', { unreadCount });
+            socket.emit('unreadCount', { unreadCount });
+        } catch (err) {
+            console.error(err);
+        }
+    });
+    
+    socket.on('getUnreadConversations', async (user_id) => {
+        try {
+            const connection = await pool.getConnection();
+            const [conversations] = await connection.execute(`
+                SELECT 
+    c.conversation_id,
+    COUNT(*) AS unread_count,
+
+    -- Last message info, excluding logged-in user
+    (
+        SELECT m2.sender_id
+        FROM Messages m2
+        WHERE m2.conversation_id = c.conversation_id AND m2.sender_id != ?
+        ORDER BY m2.sent_at DESC
+        LIMIT 1
+    ) AS last_sender_id,
+
+    (
+        SELECT m2.content
+        FROM Messages m2
+        WHERE m2.conversation_id = c.conversation_id AND m2.sender_id != ?
+        ORDER BY m2.sent_at DESC
+        LIMIT 1
+    ) AS last_message,
+
+    -- Get last sender's username
+    (
+        SELECT u2.username
+        FROM Messages m3
+        JOIN users u2 ON u2.user_id = m3.sender_id
+        WHERE m3.conversation_id = c.conversation_id AND m3.sender_id != ?
+        ORDER BY m3.sent_at DESC
+        LIMIT 1
+    ) AS last_sender_username,
+
+    -- Get last sender's photo
+    (
+        SELECT u2.photo
+        FROM Messages m3
+        JOIN users u2 ON u2.user_id = m3.sender_id
+        WHERE m3.conversation_id = c.conversation_id AND m3.sender_id != ?
+        ORDER BY m3.sent_at DESC
+        LIMIT 1
+    ) AS last_sender_photo
+
+FROM Conversations c
+JOIN ConversationParticipants cp ON cp.conversation_id = c.conversation_id
+JOIN Messages m ON m.conversation_id = c.conversation_id
+
+WHERE cp.user_id = ? AND m.sender_id != ? AND m.is_read = 0
+
+GROUP BY c.conversation_id
+ORDER BY c.updated_at DESC
+
+            `, [user_id, user_id, user_id, user_id, user_id, user_id]);
+            connection.release();
+            socket.emit('unreadConversations', { conversations });
+        } catch (err) {
+            console.error(err);
+        }
+    });
+
+    socket.on('getConversationParticipants', async ({ conversation_id }) => {
+        try {
+            const connection = await pool.getConnection();
+            const [rows] = await connection.execute(
+                'SELECT user_id FROM ConversationParticipants WHERE conversation_id = ?',
+                [conversation_id]
+            );
+            const participants = rows.map(row => row.user_id);
+            connection.release();
+            socket.emit('conversationParticipants', { success: true, participants });
+        } catch (err) {
+            socket.emit('conversationParticipants', { success: false });
+        }
+    });
+    
     // Typing indicator
     socket.on('typing', async (data) => {
         try {
@@ -278,6 +380,6 @@ io.on('connection', async (socket) => {
 });
 
 // Start the server
-server.listen(3000, () => {
-    console.log('WebSocket server running on https://satya.pl:3000');
+server.listen(3000, '0.0.0.0', () => {
+    console.log('WebSocket server listening on port 3000');
 });
